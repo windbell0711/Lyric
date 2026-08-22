@@ -313,7 +313,7 @@ class TimelineWindow(BaseImageWindow):
             "audio_path": self.player.source().toLocalFile() if self.player.source().isValid() else "",
             "extract_fade_out_ms": self.extract_fade_out_ms,
             "split_fade_in_ms": self.split_fade_in_ms,
-            "font_colors": ["#000000"],  # 默认黑色，可手动修改
+            "font_colors": ["#C1C2C3", "#000000", "#EEEEEE"],  # 默认
             "extract_timings": [
                 {
                     "extract_id": ext.extract_id,

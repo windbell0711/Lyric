@@ -15,10 +15,11 @@ logger = logging.getLogger(__name__)
 
 
 class ExtractWindow(BaseImageWindow):
-    def __init__(self, image_path: str, rect_w: int, rect_h: int):
+    def __init__(self, image_path: str, rect_w: int, rect_h: int, threshold: int = 128):
         self.image_path = image_path
         self.rect_w = rect_w
         self.rect_h = rect_h
+        self.threshold = threshold
 
         pixmap = QPixmap(image_path)
         if pixmap.isNull():
@@ -35,7 +36,7 @@ class ExtractWindow(BaseImageWindow):
         self.last_mouse_pos: Optional[QPointF] = None
 
         self.setWindowTitle("图片标记器 - Extract")
-        logger.debug(f"Extract 初始化：图片={image_path}, 矩形={rect_w}x{rect_h}")
+        logger.debug(f"Extract 初始化：图片={image_path}, 矩形={rect_w}x{rect_h}, 阈值={threshold}")
 
     # ----- 缩放（带偏移调整）-----
     def zoom(self, factor: float):
@@ -110,6 +111,7 @@ class ExtractWindow(BaseImageWindow):
             "image_path": self.image_path,
             "width": self.rect_w,
             "height": self.rect_h,
+            "threshold": self.threshold,
             "marks": [
                 {"id": m.id, "cx": round(m.cx), "cy": round(m.cy)}
                 for m in self.marks
@@ -226,7 +228,14 @@ def main_extract():
     rect_h, ok2 = QInputDialog.getInt(None, "矩形高度", "请输入标记矩形的高度（像素）:", 100, 1, 100000, 1)
     if not ok2:
         sys.exit(0)
-    window = ExtractWindow(image_path, rect_w, rect_h)
+    threshold, ok3 = QInputDialog.getInt(
+        None, "二值化阈值",
+        "请输入二值化阈值（0~255）：\n播放器渲染时，灰度大于该值的像素将被视为背景并透明化。",
+        128, 0, 255, 1,
+    )
+    if not ok3:
+        sys.exit(0)
+    window = ExtractWindow(image_path, rect_w, rect_h, threshold)
     window.showFullScreen()
     sys.exit(app.exec())
 

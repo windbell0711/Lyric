@@ -6,12 +6,13 @@
 
 ## ✨ 功能特性
 
-- **图片标记（Extract）**：全屏显示歌词图片，通过拖动和缩放，手动标记每一行歌词的位置。
+- **图片标记（Extract）**：全屏显示歌词图片，通过拖动和缩放，手动标记每一行歌词的位置，并设置二值化阈值。
 - **区域分割（Split）**：对每一行歌词裁剪出的子图，框选多个区域，作为后续逐个淡入的对象。
 - **时间轴记录（Timeline）**：跟随音乐播放，精确到毫秒记录每个片段的出现时间以及每一行的切换时间。
-- **桌面播放（Player）**：无边框透明窗口，根据时间轴播放音频并逐步显示歌词内容，支持字体颜色切换、淡入淡出动画。
+- **打包（Wrap）**：将三个 JSON、歌词图片和音频整合为一个 `.dly` 播放包。
+- **桌面播放（Player）**：无边框透明置顶窗口，直接打开 `.dly` 播放包，根据时间轴播放音频并逐步显示歌词内容，支持字体颜色切换、淡入淡出动画。
 - **数据持久化**：每个阶段生成独立 JSON 文件，便于检查、修改和传递。
-- **二值化处理**：歌词图片自动二值化，白色透明，仅显示文字部分。
+- **二值化处理**：歌词图片按 extract.json 中的阈值自动二值化，背景透明，仅显示文字部分。
 
 ---
 
@@ -53,7 +54,10 @@
    # 记录时间轴
    python timeline_window.py
 
-   # 播放桌面歌词
+   # 打包为 .dly 播放包
+   python wrap_window.py
+
+   # 播放桌面歌词（直接打开 .dly）
    python player_window.py
    ```
 
@@ -68,10 +72,12 @@
 | `extract_window.py` | Extract 阶段：全屏图片标记器 |
 | `split_window.py` | Split 阶段：区域分割器 |
 | `timeline_window.py` | Timeline 阶段：时间轴记录器 |
+| `wrap_window.py` | Wrap 阶段：打包 .dly 播放包 |
 | `player_window.py` | Player 阶段：桌面歌词播放器 |
 | `extract.json` | Extract 阶段输出 |
 | `split.json` | Split 阶段输出 |
 | `timeline.json` | Timeline 阶段输出 |
+| `*.dly` | Wrap 阶段输出（ZIP 容器，含全部数据与媒体） |
 
 ---
 
@@ -86,7 +92,9 @@
    │
    ├── timeline_window.py ─► timeline.json
    │
-   └── player_window.py ──► 桌面歌词显示
+   ├── wrap_window.py ─────► xxx.dly
+   │
+   └── player_window.py ───► 桌面歌词显示（打开 .dly）
 ```
 
 ### JSON 格式示例
@@ -98,12 +106,15 @@
   "image_path": "C:/lyrics/cover.png",
   "width": 100,
   "height": 50,
+  "threshold": 128,
   "marks": [
     {"id": 1, "cx": 300, "cy": 200},
     {"id": 2, "cx": 500, "cy": 400}
   ]
 }
 ```
+
+> `threshold`（0~255）为二值化全局参数：播放器渲染时，灰度大于该值的像素视为背景并透明化。缺失时默认 128。
 
 **split.json**
 
@@ -196,6 +207,14 @@
 | `S` / `M` | 导出 timeline.json |
 | `Esc` | 退出（询问确认） |
 
+### Wrap 阶段
+
+| 操作 | 功能 |
+|------|------|
+| 文件对话框 | 依次选择 extract.json、split.json、timeline.json |
+| 自动定位 | 从 extract.json 的 `image_path` 与 timeline.json 的 `audio_path` 找到图片和音频 |
+| 保存对话框 | 选择 .dly 输出路径并打包 |
+
 ### Player 阶段
 
 | 按键 | 功能 |
@@ -205,6 +224,8 @@
 | 鼠标左键拖动 | 移动无边框窗口 |
 | 鼠标右键 | 关闭窗口 |
 | `Esc` | 关闭窗口 |
+
+> Player 始终置顶显示（WindowStaysOnTopHint），歌词浮于其他窗口之上。
 
 ---
 
@@ -221,7 +242,8 @@
 
 - **音频格式**：依赖 Windows 系统解码器。若无声，请安装 [LAV Filters](https://github.com/Nevcairiel/LAVFilters/releases) 或 [K-Lite Codec Pack](https://codecguide.com/download_kl.htm)。
 - **图片格式**：支持常见图片格式（png, jpg, bmp, gif, tiff 等）。
-- **音频路径**：`timeline.json` 中保存的 `audio_path` 为本地文件路径（通常不含 `file://` 前缀）。播放器已兼容两种格式。
+- **播放包**：Player 阶段只接受 `.dly` 播放包，请先运行 Wrap 阶段生成。`.dly` 为 ZIP 容器，内含 `manifest.json` 文件清单，可直接用解压软件查看内容。
+- **音频路径**：`timeline.json` 中保存的 `audio_path` 为本地文件路径（通常不含 `file://` 前缀）。Wrap 阶段已兼容两种格式，打包后音频嵌入 .dly，不再依赖原始文件。
 - **透明窗口**：需要 Windows 10 及以上系统支持。若窗口未透明，请检查系统主题或尝试重启应用。
 
 ---

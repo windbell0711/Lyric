@@ -1,11 +1,14 @@
 import sys
+import os
 import json
 import logging
 import time
+import tempfile
+import zipfile
 from typing import Dict, List, Optional, Set
 
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, QUrl
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QImage, QMouseEvent, QKeyEvent
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QImage, QMouseEvent, QKeyEvent, QCloseEvent
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtWidgets import QApplication, QWidget, QFileDialog, QMessageBox
 
@@ -28,16 +31,18 @@ class PlayerWindow(QWidget):
     DEFAULT_SPLIT_FADE_IN_MS = 200
     DEFAULT_FONT_COLORS = ["#000000"]  # 默认黑色
 
-    def __init__(self, extract_path: str, split_path: str, timeline_path: str):
+    def __init__(self, dly_path: str):
         super().__init__()
 
-        # ----- 加载三个 JSON -----
-        with open(extract_path, "r", encoding="utf-8") as f:
-            extract_data = json.load(f)
-        with open(split_path, "r", encoding="utf-8") as f:
-            split_data = json.load(f)
-        with open(timeline_path, "r", encoding="utf-8") as f:
-            timeline_data = json.load(f)
+        # ----- 从 .dly 包中读取三个 JSON 与媒体文件 -----
+        with zipfile.ZipFile(dly_path, "r") as zf:
+            manifest = json.loads(zf.read("manifest.json"))
+            extract_data = json.loads(zf.read(manifest["extract_json"]))
+            split_data = json.loads(zf.read(manifest["split_json"]))
+            timeline_data = json.loads(zf.read(manifest["timeline_json"]))
+            image_bytes = zf.read(manifest["image_file"])
+            audio_bytes = zf.read(manifest["audio_file"])
+            audio_suffix = os.path.splitext(manifest["audio_file"])[1] or ".bin"
 
         self.image_path = extract_data["image_path"]
         self.rect_w = int(extract_data["width"])
@@ -45,6 +50,10 @@ class PlayerWindow(QWidget):
         self.marks = extract_data["marks"]
         self.splits_data = split_data["splits"]
         self.extract_timings = timeline_data["extract_timings"]
+
+        # 二值化阈值（extract.json 全局参数，缺失时默认 128）
+        self.threshold = int(extract_data.get("threshold", 128))
+        logger.info(f"二值化阈值：{self.threshold}")
 
         # 动画时长
         self.extract_fade_out_ms = timeline_data.get(
@@ -60,10 +69,10 @@ class PlayerWindow(QWidget):
         self.current_color_index = 0
         logger.info(f"字体颜色列表：{self.font_colors}")
 
-        # ----- 加载原图并裁剪二值化子图（透明背景）-----
-        original = QPixmap(self.image_path)
-        if original.isNull():
-            raise ValueError(f"无法加载原图: {self.image_path}")
+        # ----- 加载原图（从包内字节流）并裁剪二值化子图（透明背景）-----
+        original = QPixmap()
+        if not original.loadFromData(image_bytes):
+            raise ValueError(f"无法解码包内图片: {manifest['image_file']}")
 
         self.base_binary_images: Dict[int, QPixmap] = {}  # 二值化掩码（黑字透明底）
         for mark in self.marks:
@@ -91,27 +100,32 @@ class PlayerWindow(QWidget):
                        for r in item["regions"]]
             self.extract_regions[eid] = regions
 
-        # ----- 音频播放器 -----
+        # ----- 音频播放器（音频解包到临时文件后播放）-----
+        self._temp_audio_path: Optional[str] = None
+        fd, self._temp_audio_path = tempfile.mkstemp(
+            prefix="dly_audio_", suffix=audio_suffix
+        )
+        with os.fdopen(fd, "wb") as f:
+            f.write(audio_bytes)
+        logger.info(f"音频已解包到临时文件: {self._temp_audio_path}")
+
         self.audio_output = QAudioOutput()
         self.audio_output.setVolume(1.0)
         self.player = QMediaPlayer()
         self.player.setAudioOutput(self.audio_output)
-
-        audio_path = timeline_data.get("audio_path", "")
-        if not audio_path:
-            raise ValueError("timeline.json 中缺少 audio_path")
-        logger.info(f"音频路径: {audio_path}")
-        if audio_path.startswith("file://"):
-            self.player.setSource(QUrl(audio_path))
-        else:
-            self.player.setSource(QUrl.fromLocalFile(audio_path))
+        self.player.setSource(QUrl.fromLocalFile(self._temp_audio_path))
 
         self.player.errorOccurred.connect(self._on_player_error)
         self.player.mediaStatusChanged.connect(self._on_media_status_changed)
 
-        # ----- 窗口设置（透明无边框）-----
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        # ----- 窗口设置（透明无边框，始终置顶）-----
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # 关键：QWidget 默认焦点策略为 NoFocus，无边框窗口将永远无法获得键盘焦点，
+        # 真实按键（P/M/Esc）根本不会到达 keyPressEvent。必须显式允许强焦点。
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         # 窗口大小基于子图原始尺寸缩放
         if self.base_binary_images:
@@ -183,15 +197,15 @@ class PlayerWindow(QWidget):
             painter.drawPixmap(dst_left, dst_top, crop)
             painter.end()
 
-        return self._binarize_image(sub)
+        return self._binarize_image(sub, self.threshold)
 
-    def _binarize_image(self, image: QImage) -> QPixmap:
-        """二值化并设置 alpha：白色透明，黑色不透明。"""
+    def _binarize_image(self, image: QImage, threshold: int = 128) -> QPixmap:
+        """二值化并设置 alpha：灰度大于阈值的像素透明，其余不透明。"""
         for y in range(image.height()):
             for x in range(image.width()):
                 color = image.pixelColor(x, y)
                 gray = color.red() * 0.299 + color.green() * 0.587 + color.blue() * 0.114
-                if gray > 128:
+                if gray > threshold:
                     image.setPixelColor(x, y, QColor(0, 0, 0, 0))  # 透明
                 else:
                     image.setPixelColor(x, y, QColor(0, 0, 0, 255))  # 黑色（将被着色）
@@ -260,9 +274,12 @@ class PlayerWindow(QWidget):
         if playing:
             # 1. extract 淡出
             if self.extract_fade_out_alpha > 0.0:
-                alpha_decrease = delta * 1000 / self.extract_fade_out_ms
+                fade_out_ms = max(self.extract_fade_out_ms, 1)
+                alpha_decrease = delta * 1000 / fade_out_ms
                 self.extract_fade_out_alpha -= alpha_decrease
-                if self.extract_fade_out_alpha < 0.0:
+                # 必须用 <= 0.0：当减量恰好整除 1.0 时会精确落在 0.0，
+                # 若只判断 < 0.0 将永远无法触发切换，导致不显示任何歌词
+                if self.extract_fade_out_alpha <= 0.0:
                     self.extract_fade_out_alpha = 0.0
                     self._perform_extract_switch()
                 self.update()
@@ -272,7 +289,8 @@ class PlayerWindow(QWidget):
                 if target == 1.0 and split_id in self.split_alphas:
                     current_alpha = self.split_alphas[split_id]
                     if current_alpha < 1.0:
-                        alpha_increase = delta * 1000 / self.split_fade_in_ms
+                        fade_in_ms = max(self.split_fade_in_ms, 1)
+                        alpha_increase = delta * 1000 / fade_in_ms
                         new_alpha = current_alpha + alpha_increase
                         if new_alpha > 1.0:
                             new_alpha = 1.0
@@ -380,10 +398,23 @@ class PlayerWindow(QWidget):
             painter.restore()
 
     # ------------------------------------------------------------------
+    # 焦点管理：无边框透明窗口不会自动获得键盘焦点，
+    # 在显示时主动激活并抢占焦点，保证快捷键（P/M/Esc）可用
+    # ------------------------------------------------------------------
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.activateWindow()
+        self.raise_()
+        self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    # ------------------------------------------------------------------
     # 鼠标事件：左键拖动，右键关闭
     # ------------------------------------------------------------------
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
+            # 点击窗口时重新获得焦点：拖动后按键（如 Esc）仍需生效
+            self.activateWindow()
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
             self._mouse_pressed = True
             self._mouse_press_global = event.globalPosition().toPoint()
             self._mouse_press_window = self.pos()
@@ -426,24 +457,66 @@ class PlayerWindow(QWidget):
             self.timer.start()
             logger.debug("开始/恢复播放")
 
+    def closeEvent(self, event: QCloseEvent):
+        """关闭窗口。
+
+        注意：不要在 GUI 线程同步析构 QMediaPlayer（self.player = None 会立即
+        删除 C++ 对象并等待 FFmpeg 引擎线程退出，可能长时间阻塞导致窗口
+        "按 Esc 无响应/卡死"）。这里改用 deleteLater() 把销毁交给事件循环，
+        窗口立即关闭，再延迟退出应用让销毁与临时音频清理有机会完成。
+        """
+        self.timer.stop()
+
+        player = self.player
+        audio_output = self.audio_output
+        temp_path = self._temp_audio_path
+        self.player = None
+        self.audio_output = None
+        self._temp_audio_path = None
+
+        if player is not None:
+            try:
+                player.stop()
+            except Exception:
+                pass
+            player.deleteLater()
+        if audio_output is not None:
+            audio_output.deleteLater()
+        # 保留引用，避免解释器退出时对活跃播放器做同步析构
+        self._shutdown_refs = (player, audio_output)
+
+        if temp_path:
+            def _try_remove_temp():
+                try:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                        logger.debug(f"已删除临时音频: {temp_path}")
+                except OSError as e:
+                    logger.warning(f"删除临时音频失败（文件可能仍被系统占用）: {e}")
+
+            _try_remove_temp()  # 立即尝试（stop 后引擎可能已释放句柄）
+            # 引擎释放文件句柄是异步的，延迟重试一次
+            QTimer.singleShot(500, _try_remove_temp)
+
+        # 让事件循环先处理 deleteLater 的延迟销毁，再退出应用
+        QTimer.singleShot(800, lambda: QApplication.instance().quit())
+        super().closeEvent(event)
+
 
 def main_player():
     app = QApplication(sys.argv)
+    # 关闭窗口后不立即退出：closeEvent 会延迟销毁播放器并清理临时文件，
+    # 之后由 closeEvent 内的定时器显式退出，避免在解释器退出时同步析构播放器
+    app.setQuitOnLastWindowClosed(False)
 
-    extract_path, _ = QFileDialog.getOpenFileName(None, "选择 extract.json", "", "JSON 文件 (*.json)")
-    if not extract_path:
-        sys.exit(0)
-
-    split_path, _ = QFileDialog.getOpenFileName(None, "选择 split.json", "", "JSON 文件 (*.json)")
-    if not split_path:
-        sys.exit(0)
-
-    timeline_path, _ = QFileDialog.getOpenFileName(None, "选择 timeline.json", "", "JSON 文件 (*.json)")
-    if not timeline_path:
+    dly_path, _ = QFileDialog.getOpenFileName(
+        None, "选择 .dly 播放包", "", "Lyric 播放包 (*.dly)"
+    )
+    if not dly_path:
         sys.exit(0)
 
     try:
-        window = PlayerWindow(extract_path, split_path, timeline_path)
+        window = PlayerWindow(dly_path)
         window.show()
         sys.exit(app.exec())
     except Exception as e:

@@ -5,12 +5,13 @@ import logging
 import time
 import tempfile
 import zipfile
+import urllib.request
 from typing import Dict, List, Optional, Set
 
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, QUrl
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QImage, QMouseEvent, QKeyEvent, QCloseEvent
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PyQt6.QtWidgets import QApplication, QWidget, QFileDialog, QMessageBox
+from PyQt6.QtWidgets import QApplication, QWidget, QFileDialog, QInputDialog, QMessageBox
 
 from models import SplitRegion
 
@@ -257,8 +258,18 @@ class PlayerWindow(QWidget):
             self.timer.start()
             logger.debug("媒体加载完成，自动开始播放")
         elif status == QMediaPlayer.MediaStatus.EndOfMedia:
-            logger.info("音频播放结束")
-            self.timer.stop()
+            # 默认单曲循环：回到起点并重置歌词显示状态，从头重新播放
+            logger.info("音频播放结束，单曲循环：从头重新播放")
+            self.player.setPosition(0)
+            self.current_extract_id = None
+            self.pending_extract_id = None
+            self.extract_fade_out_alpha = 0.0
+            self.split_alphas.clear()
+            self.split_target_alphas.clear()
+            self.split_fade_in_start.clear()
+            self.player.play()
+            self.timer.start()
+            self.update()
 
     # ------------------------------------------------------------------
     # 更新当前帧（含动画）
@@ -503,17 +514,68 @@ class PlayerWindow(QWidget):
         super().closeEvent(event)
 
 
+def _download_dly(url: str, timeout: int = 30) -> str:
+    """从 URL 下载 .dly 播放包到临时文件，返回临时文件路径。
+
+    下载失败（网址无效、网络错误、返回内容不是 .dly）时抛出异常。
+    """
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (Lyric-Player)"}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read()
+
+    # .dly 为 ZIP 容器，校验文件头，避免把非 .dly 内容当播放包使用
+    if not data.startswith(b"PK"):
+        raise ValueError("下载的内容不是有效的 .dly 播放包（ZIP 容器）")
+
+    fd, tmp_path = tempfile.mkstemp(prefix="dly_remote_", suffix=".dly")
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    return tmp_path
+
+
 def main_player():
     app = QApplication(sys.argv)
     # 关闭窗口后不立即退出：closeEvent 会延迟销毁播放器并清理临时文件，
     # 之后由 closeEvent 内的定时器显式退出，避免在解释器退出时同步析构播放器
     app.setQuitOnLastWindowClosed(False)
 
-    dly_path, _ = QFileDialog.getOpenFileName(
-        None, "选择 .dly 播放包", "", "Lyric 播放包 (*.dly)"
+    # 1. 先询问 .dly 播放包的网址；留空则回退到本地文件选择
+    url, ok = QInputDialog.getText(
+        None,
+        "输入 .dly 网址",
+        "请输入 .dly 播放包的网址（留空则选择本地文件）：",
     )
-    if not dly_path:
+    if not ok:
         sys.exit(0)
+    url = url.strip()
+
+    dly_path: Optional[str] = None
+    downloaded_tmp: Optional[str] = None
+
+    if url:
+        # 2. 网址非空：先尝试从该网址获取 .dly 文件
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            downloaded_tmp = _download_dly(url)
+            dly_path = downloaded_tmp
+            logger.info(f"已从网址下载 .dly 文件: {url}")
+        except Exception as e:
+            logger.error(f"下载 .dly 文件失败：{url} - {e}")
+            QMessageBox.critical(
+                None, "网址无效", f"无法从该网址获取 .dly 文件：\n{e}"
+            )
+            sys.exit(1)
+        finally:
+            QApplication.restoreOverrideCursor()
+    else:
+        # 3. 网址为空：正常索要本地文件
+        dly_path, _ = QFileDialog.getOpenFileName(
+            None, "选择 .dly 播放包", "", "Lyric 播放包 (*.dly)"
+        )
+        if not dly_path:
+            sys.exit(0)
 
     try:
         window = PlayerWindow(dly_path)
@@ -523,6 +585,15 @@ def main_player():
         logger.error(f"播放器初始化失败：{e}")
         QMessageBox.critical(None, "错误", f"初始化失败：\n{e}")
         sys.exit(1)
+    finally:
+        # PlayerWindow 在 __init__ 中已将 .dly 内容全部读入内存，
+        # 这里可以安全删除下载产生的临时文件
+        if downloaded_tmp is not None:
+            try:
+                os.remove(downloaded_tmp)
+                logger.debug(f"已删除下载的临时文件: {downloaded_tmp}")
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

@@ -25,62 +25,6 @@
 
 ---
 
-## 📦 安装与运行
-
-1. **安装依赖**
-
-   ```bash
-   pip install pyqt6
-   ```
-
-2. **克隆或下载项目**
-
-   ```bash
-   git clone <你的仓库地址>
-   cd Lyric
-   ```
-
-3. **运行各阶段**
-
-   每个阶段独立运行，按提示选择文件即可：
-
-   ```bash
-   # 提取歌词行
-   python extract_window.py
-
-   # 分割歌词片段
-   python split_window.py
-
-   # 记录时间轴
-   python timeline_window.py
-
-   # 打包为 .dly 播放包
-   python wrap_window.py
-
-   # 播放桌面歌词（直接打开 .dly）
-   python player_window.py
-   ```
-
----
-
-## 📁 文件说明
-
-| 文件 | 功能 |
-|------|------|
-| `models.py` | 所有数据类定义 |
-| `common.py` | 公共基类，封装缩放、绘制、对话框等 |
-| `extract_window.py` | Extract 阶段：全屏图片标记器 |
-| `split_window.py` | Split 阶段：区域分割器 |
-| `timeline_window.py` | Timeline 阶段：时间轴记录器 |
-| `wrap_window.py` | Wrap 阶段：打包 .dly 播放包 |
-| `player_window.py` | Player 阶段：桌面歌词播放器 |
-| `extract.json` | Extract 阶段输出 |
-| `split.json` | Split 阶段输出 |
-| `timeline.json` | Timeline 阶段输出 |
-| `*.dly` | Wrap 阶段输出（ZIP 容器，含全部数据与媒体） |
-
----
-
 ## 🔄 数据流
 
 ```
@@ -217,8 +161,11 @@
 
 ### Player 阶段
 
-| 按键 | 功能 |
+> 启动后先弹出输入框询问 `.dly` 播放包的网址：输入网址则从该网址下载并打开；留空则弹出文件对话框选择本地 `.dly`；网址无效（无法访问或内容不是 .dly）会弹出错误提示并退出。
+
+| 操作 | 功能 |
 |------|------|
+| 网址输入框 | 输入 .dly 网址下载打开；留空则选择本地文件 |
 | `P` | 暂停 / 继续播放 |
 | `M` | 切换字体颜色（循环 font_colors） |
 | 鼠标左键拖动 | 移动无边框窗口 |

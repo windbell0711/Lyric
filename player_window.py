@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Set
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, QUrl
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QImage, QMouseEvent, QKeyEvent, QCloseEvent
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PyQt6.QtWidgets import QApplication, QWidget, QFileDialog, QInputDialog, QMessageBox
+from PyQt6.QtWidgets import QApplication, QWidget, QFileDialog, QInputDialog, QMessageBox, QProgressDialog
 
 from models import SplitRegion
 
@@ -556,6 +556,17 @@ def main_player():
 
     if url:
         # 2. 网址非空：先尝试从该网址获取 .dly 文件
+        #    下载可能较慢，先弹出提示框告知用户耐心等待（同步下载期间
+        #    事件循环被阻塞，需用 processEvents 让提示框先完成绘制）
+        progress = QProgressDialog(
+            "正在下载 .dly 文件，请耐心等待…", None, 0, 0, None
+        )
+        progress.setWindowTitle("下载中（未响应是正常现象）")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setCancelButton(None)  # 不提供取消按钮，避免中途关闭
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             downloaded_tmp = _download_dly(url)
@@ -569,6 +580,7 @@ def main_player():
             sys.exit(1)
         finally:
             QApplication.restoreOverrideCursor()
+            progress.close()
     else:
         # 3. 网址为空：正常索要本地文件
         dly_path, _ = QFileDialog.getOpenFileName(
